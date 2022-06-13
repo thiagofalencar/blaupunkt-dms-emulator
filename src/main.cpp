@@ -5,44 +5,85 @@
 #include "Adafruit_SSD1306.h"
 #include "SoftwareSerial.h"
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
-#define OLED_RESET    -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+/**
+ * OLED Screen Constants
+ */
+#define SCREEN_WIDTH    128 // OLED display width, in pixels
+#define SCREEN_HEIGHT   32 // OLED display height, in pixels
+#define OLED_RESET      4 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS  0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 
-#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+/**
+ * Screen Display
+ */
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-#define rxPin 9
-#define txPin 10
+/**
+ * Serial Port
+ */
+#define PIN_RX 9
+#define PIN_TX 10
 
-#define cmd_end 0x14F
+/**
+ * Commands Static Values
+ */
+#define CMD_END      0x14F
+#define CMD_RECEIVE   0x180
 
+/**
+ * Registers to manage status
+ */
+bool cnn_is_turned_on = false;
+bool cdc_initialized = false;
+bool cdc_is_no_cd = false;
+bool cdc_is_playing = false;
 
-bool initialized  = false;
-bool handshake    = false;
-bool noCD         = false;
-bool playing      = false;
+char const *executed_function = "";
 
-char const *executing = "";
-
-int playing_total   = 0;
-int playing_minutes = 0;
-int playing_seconds = 0;
-int playing_disc    = 0;
-int playing_song    = 0;
-
+/**
+ * Playing music status
+ */
+unsigned int playing_total = 0;
+unsigned int playing_minutes = 0;
+unsigned int playing_seconds = 0;
+unsigned int playing_disc = 0;
+unsigned int playing_song = 0;
 unsigned long playing_time = 0;
 unsigned long playing_time_last_sent = 0;
 
-int bitDuration = 200;
-unsigned lastCommand = NULL;
-unsigned sentCommand = NULL;
+/**
+ * Serial communication registers
+ */
+unsigned int bitDuration = 200;
+unsigned last_command;
+unsigned sent_command;
+bool sending_echo = false;
+bool sending_commands = false;
+bool receiving_commands = false;
 
-// Set up Connect NAV+ Serial Connection
-SoftwareSerial serial =  SoftwareSerial(rxPin, txPin, true);
+/**
+ * Setup Connect NAV+ Serial Connection
+ */
+SoftwareSerial serial = SoftwareSerial(PIN_RX, PIN_TX, true);
 
-void initializeDisplay() {
-    executing = "initializeDisplay";
+/**
+ * @name set_executed_function
+ *  Set executed function
+ *
+ * @param command
+ */
+void set_executed_function(const char *command) {
+    executed_function = command;
+}
+
+/**
+ * @name initialize_display
+ * initialize_display
+ *
+ * @return void
+ */
+void initialize_display() {
+    set_executed_function("initialize_display");
     // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
     if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
         Serial.println(F("SSD1306 allocation failed"));
@@ -54,41 +95,55 @@ void initializeDisplay() {
     display.clearDisplay();
 }
 
-void setBound(int bound) {
-    executing = "setBound";
+/**
+ * Set SoftwareSerial bound rate
+ * @param bound
+ */
+void set_serial_bound(int bound) {
+    set_executed_function("set_serial_bound");
     serial.begin(bound);
     bitDuration = (bound == 4800) ? 200 : 100;
 }
 
-// Read Connect NAV+ Data from serial port
+/**
+ * @name rx
+ * Read Connect NAV+ Data from serial port
+ *
+ * @return
+ */
 unsigned rx() {
     unsigned data = NULL;
-    do {
+    receiving_commands = true;
+    /**
+     * @todo: Remove while to update the prevent stuck statuses
+     */
+//    do {
         if (serial.available()) {
             data = serial.read();
             // Fix 8bits to 9 bits conversion
             switch (0x1FF & data) {
                 case 0x80: {
-                    data = 0x180;
+                    data = CMD_RECEIVE;
                     break;
                 }
                 case 0x4F: {
-                    data = cmd_end;
+                    data = CMD_END;
                     break;
                 }
             }
         }
-    } while (!data);
+//    } while (!data);
 
-    if (data != cmd_end) {
-        lastCommand = data;
+    if (data != CMD_END) {
+        last_command = data;
     }
+    receiving_commands = false;
     return data;
 };
 
-void sendBit(bool value, int duration = 1) {
-    executing = "sendBit";
-    digitalWrite(txPin, (value) ? HIGH : LOW);
+void send_bit(bool value, int duration = 1) {
+    set_executed_function("send_bit");
+    digitalWrite(PIN_TX, (value) ? HIGH : LOW);
     delayMicroseconds(bitDuration * duration);
 }
 
@@ -96,114 +151,122 @@ void sendBit(bool value, int duration = 1) {
    Transmit value using serial connection
 */
 void tx(unsigned value) {
-    executing = "tx";
+    set_executed_function("tx");
+    sending_commands = true;
 
-    sendBit(0, 4);
-    sendBit(1);
+    send_bit(0, 4);
+    send_bit(1);
 
     if (value) {
         for (int i = 0; i < 9; i++) {
-            sendBit(bitRead(~value, i));
+            send_bit(bitRead(~value, i));
         }
     } else {
-        sentCommand = 0x00;
-        sendBit(1, 9);
+        sent_command = 0x00;
+        send_bit(1, 9);
     }
-    sendBit(0, 4);
+    send_bit(0, 4);
 
-    if (value == cmd_end)
+    if (value == CMD_END)
         delay(3);
+    sending_commands = false;
 }
 
 
 /**
-   Send a value and wait for the answer
-   @returns bool
+ * Send a value and wait for the answer
 */
-void echo(unsigned value) {
-    executing = "echo";
+void echo_command(unsigned value) {
+    sending_echo = true;
+    set_executed_function("echo_command");
     tx(value);
-    if (value != cmd_end) {
-        sentCommand = value;
+    if (value != CMD_END) {
+        sent_command = value;
     }
     if (value) {
         rx();
     }
 }
 
+
 /**
-   Transmit a list of values
-*/
-void txList(int *list, int size, int first = 0) {
-    executing = "txList";
+ * @name transmit_commands
+ * Transmit a list of values
+ *
+ * @param list List of commands
+ * @param size
+ * @param first
+ */
+void transmit_commands(int *list, int size, int first = 0) {
+    set_executed_function("transmit_commands");
 
     for (int i = first; i < first + size; i++) {
-        echo(list[i]);
-        delay((list[i] == cmd_end) ? 30 : 3);
+        echo_command(list[i]);
+        delay((list[i] == CMD_END) ? 30 : 3);
     }
 }
 
 /**
    Send commands to show No Disc
 */
-void setNoCD() {
-    executing = "setNoCD";
-    noCD = true;
-    int noCDCmds[] = {
-            0x10E, 0x009, 0x007, cmd_end,
-            0x103, 0x020, 0x00A, 0x010, 0x000, cmd_end,
-            0x10C, 0x001, cmd_end,
+void send_no_disc() {
+    set_executed_function("send_no_disc");
+    cdc_is_no_cd = true;
+    int no_disc_commands[] = {
+            0x10E, 0x009, 0x007, CMD_END,
+            0x103, 0x020, 0x00A, 0x010, 0x000, CMD_END,
+            0x10C, 0x001, CMD_END,
     };
-    txList(noCDCmds, 13);
+    transmit_commands(no_disc_commands, 13);
 }
 
 
-void setDiscReady(int disc, int songs) {
-    executing = "setDiscReady";
+void set_disc_ready(int disc, int songs) {
+    set_executed_function("set_disc_ready");
     int discReady[] = {
             // Set disc position is being verified
-            0x101,  disc, 0x001, cmd_end,
-            0x103, 0x020, 0x009, 0x020, 0x000, cmd_end,
+            0x101, disc, 0x001, CMD_END,
+            0x103, 0x020, 0x009, 0x020, 0x000, CMD_END,
             // Set disc as readable
-            0x101, disc, 0x001, cmd_end,
+            0x101, disc, 0x001, CMD_END,
             // Set title of Disc
             0x010B, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0047, 0x014F,
             // Songs quantities
             0x010D, disc, songs, 0x0047, 0x0011, 0x014F,
     };
-    txList(discReady, 4);
+    transmit_commands(discReady, 4);
     delay(30);
-    txList(discReady, 6, 4);
+    transmit_commands(discReady, 6, 4);
     delay(30);
-    txList(discReady, 10, 14);
+    transmit_commands(discReady, 10, 14);
     delay(30);
-    txList(discReady, 6, 24);
+    transmit_commands(discReady, 6, 24);
     delay(30);
-    txList(discReady, 4, 10);
+    transmit_commands(discReady, 4, 10);
     delay(30);
-    txList(discReady, 6, 4);
+    transmit_commands(discReady, 6, 4);
 }
 
-void replyCommand(unsigned data) {
-    executing = "replyCommand";
+void reply_command(unsigned data) {
+    set_executed_function("reply_command");
     switch (data) {
         case 0xA9: {
             tx(data);
             tx(0x00);
             break;
         }
-        case cmd_end: {
+        case CMD_END: {
             break;
         }
         default: {
             tx(data);
-            replyCommand(rx());
+            reply_command(rx());
         }
     }
 }
 
-void updateSongTime() {
-    executing = "sendSongTime";
+void set_song_status() {
+    set_executed_function("sendSongTime");
     bool finished = false;
 
     unsigned long currentMillis = millis();
@@ -211,102 +274,106 @@ void updateSongTime() {
 
     if (playing_time_ms >= 1000) {
         div_t divisionOfTime = div(playing_time_ms / 1000, 60);
-        playing_minutes = divisionOfTime.quot;
-        playing_seconds = (playing_time_ms / 1000) - ((int) playing_minutes * 60);
+        playing_minutes = (int) divisionOfTime.quot;
+        playing_seconds = (int) ((playing_time_ms / 1000) - (playing_minutes * 60));
 
         if (playing_time_ms - playing_time_last_sent >= 1000) {
             playing_time_last_sent = playing_time_ms;
-            int stats[] = { 0x109, playing_minutes, playing_seconds, cmd_end };
-            txList(stats, 4);
+            int stats[] = {0x109, (int) playing_minutes, (int) playing_seconds, CMD_END};
+            transmit_commands(stats, 4);
         }
     }
 }
 
 
-void playDisc(int disc, int song, int duration) {
-    executing = "playDisc";
-    playing = true;
-    int execution[] {
-            0x103, 0x020, 0x009, 0x020, 0x000, cmd_end,
-            0x101, disc, song, cmd_end,
+void send_play_disc(int disc, int song, int duration) {
+    set_executed_function("send_play_disc");
+    cdc_is_playing = true;
+
+    int execution[]{
+            0x103, 0x020, 0x009, 0x020, 0x000, CMD_END,
+            0x101, disc, song, CMD_END,
     };
+
     playing_total = duration;
-    txList(execution, 10);
+    transmit_commands(execution, 10);
     delay(30);
 }
 
-void setup()  {
-    executing = "setup";
+void setup() {
+    set_executed_function("setup");
     // Define pin modes for tx, rx, led pins:
-    pinMode(rxPin, INPUT);
-    pinMode(txPin, OUTPUT);
+    pinMode(PIN_RX, INPUT);
+    pinMode(PIN_TX, OUTPUT);
     Serial.begin(9600);
-    initializeDisplay();
+    initialize_display();
 
 
     // Set the data rate for the SoftwareSerial port
-    setBound(4800);
+    set_serial_bound(4800);
 
     // Define the TX line to 0
-    sendBit(0);
+    send_bit(0);
 }
 
 
-void drawListOfCommands() {
+void draw_command_screen() {
     display.clearDisplay();
-
-    display.setTextSize(2);      // Normal 1:1 pixel scale
+    display.setTextSize(1);      // Normal 1:1 pixel scale
     display.setTextColor(SSD1306_WHITE); // Draw white text
     display.setCursor(0, 0);     // Start at top-left corner
     display.cp437(true);         // Use full 256 char 'Code Page 437' font
 
-    char steps[][8] =  { " Init", " Hand", " No Disc" };
-    char stepsStatus[] = { initialized, handshake, noCD };
+    bool stepsStatus[] = {
+            cnn_is_turned_on,
+            cdc_initialized,
+            cdc_is_no_cd,
+    };
 
-    //  for (int i = 0; i < 3; i++) {
-    //    display.write((stepsStatus[i]) ? 0x1A : ' ');
-    //    display.write(steps[i]);
-    //    display.write('\n');
-    //  }
+    for (bool & stepsStat : stepsStatus) {
+        display.write(stepsStat ? 0xDB : 0x20);
+    }
+
+    if (sending_commands || receiving_commands) {
+        digitalWrite(LED_BUILTIN ,HIGH);
+    }
+
+    display.setCursor(0, 9);
 
     //  display.setCursor(60, 0);
-    if (lastCommand) {
-        display.print(F("0x"));
-        display.print(lastCommand, HEX);
-        display.print(F(" 0x"));
-        display.println(sentCommand, HEX);
-        String desc = "";
+    if (last_command) {
+        String description = "";
+
         display.setTextSize(1);
-        switch (lastCommand) {
+        switch (last_command) {
             case 0xAD: {
-                desc = "Boot";
+                description = "Boot";
                 break;
             }
             case 0x21: {
-                desc = "Sending command";
+                description = "Sending command";
             }
         }
-        display.println(desc);
+        display.println(description);
+        display.print(F("0x"));
+        display.print(last_command, HEX);
+        display.print(F(" 0x"));
+        display.println(sent_command, HEX);
     }
-
-
-    //  // Not all the characters will fit on the display. This is normal.
-    //  // Library will draw what it can and the rest will be clipped.
-    //  for(int16_t i=0; i<256; i++) {
-    //    if(i == '\n') display.write(' ');
-    //    else          display.write(i);
-    //  }
 
     display.display();
 }
 
-void drawPlayTime() {
-
-    display.setTextSize(1);      // Normal 1:1 pixel scale
+/**
+ * draw_song_status
+ * Display dashboard on Oled Screen
+ */
+void draw_song_status() {
+    display.setTextSize(1);          // Normal 1:1 pixel scale
     display.setCursor(0, 24);     // Start at top-left corner
-    display.cp437(true);         // Use full 256 char 'Code Page 437' font
+    display.cp437(true);             // Use full 256 char 'Code Page 437' font
 
-    if (playing) {
+    if (cdc_is_playing) {
         display.setCursor(8, 24);
         display.write(0x10);
         display.setCursor(16, 24);
@@ -338,39 +405,44 @@ void drawPlayTime() {
     display.display();
 }
 
+/**
+ * @name loop
+ */
 void loop() {
-    drawListOfCommands();
-    if (playing) {
-        updateSongTime();
-        drawPlayTime();
+    draw_command_screen();
+    if (cdc_is_playing) {
+        if (!playing_total) {
+            set_song_status();
+        }
+        draw_song_status();
     }
 
     unsigned data = rx();
 
-    if (data == 0x180) {
-        initialized = true;
-        replyCommand(data);
+    if (data == CMD_RECEIVE) {
+        cnn_is_turned_on = true;
+        reply_command(data);
     }
 
-    switch (lastCommand) {
+    switch (last_command) {
         case 0x21: {
-            handshake = true;
+            cdc_initialized = true;
             delay(5000);
-            setNoCD();
+            send_no_disc();
             break;
         }
         case 0xA5: {
-            if (lastCommand == 0xA5) {
+            if (last_command == 0xA5) {
                 delay(30);
-                setDiscReady(1, 5); // Testado
+                set_disc_ready(1, 5); // Testado
                 delay(1000);
-                playing = true;
+                cdc_is_playing = true;
             }
             break;
         }
         default: {
-            if (playing) {
-                playDisc(1, 1, 300);
+            if (cdc_is_playing) {
+                send_play_disc(1, 1, 300);
             }
         }
     }

@@ -117,7 +117,7 @@ unsigned rx() {
     /**
      * @todo: Remove while to update the prevent stuck statuses
      */
-//    do {
+    do {
         if (serial.available()) {
             data = serial.read();
             // Fix 8bits to 9 bits conversion
@@ -132,7 +132,7 @@ unsigned rx() {
                 }
             }
         }
-//    } while (!data);
+    } while (!data);
 
     if (data != CMD_END) {
         last_command = data;
@@ -176,7 +176,7 @@ void tx(unsigned value) {
 /**
  * Send a value and wait for the answer
 */
-void echo_command(unsigned value) {
+unsigned echo_command(unsigned value) {
     sending_echo = true;
     set_executed_function("echo_command");
     tx(value);
@@ -184,8 +184,9 @@ void echo_command(unsigned value) {
         sent_command = value;
     }
     if (value) {
-        rx();
+        return rx();
     }
+    return NULL;
 }
 
 
@@ -217,11 +218,15 @@ void send_no_disc() {
             0x103, 0x020, 0x00A, 0x010, 0x000, CMD_END,
             0x10C, 0x001, CMD_END,
     };
-    transmit_commands(no_disc_commands, 13);
+    transmit_commands(no_disc_commands, 4, 0);
+    delay(30);
+    transmit_commands(no_disc_commands, 6, 4);
+    delay(30);
+    transmit_commands(no_disc_commands, 3, 10);
 }
 
 
-void set_disc_ready(int disc, int songs) {
+int set_disc_ready(int disc, int songs) {
     set_executed_function("set_disc_ready");
     int discReady[] = {
             // Set disc position is being verified
@@ -230,9 +235,9 @@ void set_disc_ready(int disc, int songs) {
             // Set disc as readable
             0x101, disc, 0x001, CMD_END,
             // Set title of Disc
-            0x010B, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0047, 0x014F,
+            0x010B, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0047, CMD_END,
             // Songs quantities
-            0x010D, disc, songs, 0x0047, 0x0011, 0x014F,
+            0x010D, disc, songs, 0x0047, 0x0011, CMD_END,
     };
     transmit_commands(discReady, 4);
     delay(30);
@@ -264,27 +269,6 @@ void reply_command(unsigned data) {
         }
     }
 }
-
-void set_song_status() {
-    set_executed_function("sendSongTime");
-    bool finished = false;
-
-    unsigned long currentMillis = millis();
-    unsigned long playing_time_ms = currentMillis - playing_time;
-
-    if (playing_time_ms >= 1000) {
-        div_t divisionOfTime = div(playing_time_ms / 1000, 60);
-        playing_minutes = (int) divisionOfTime.quot;
-        playing_seconds = (int) ((playing_time_ms / 1000) - (playing_minutes * 60));
-
-        if (playing_time_ms - playing_time_last_sent >= 1000) {
-            playing_time_last_sent = playing_time_ms;
-            int stats[] = {0x109, (int) playing_minutes, (int) playing_seconds, CMD_END};
-            transmit_commands(stats, 4);
-        }
-    }
-}
-
 
 void send_play_disc(int disc, int song, int duration) {
     set_executed_function("send_play_disc");
@@ -330,12 +314,12 @@ void draw_command_screen() {
             cdc_is_no_cd,
     };
 
-    for (bool & stepsStat : stepsStatus) {
+    for (bool &stepsStat: stepsStatus) {
         display.write(stepsStat ? 0xDB : 0x20);
     }
 
     if (sending_commands || receiving_commands) {
-        digitalWrite(LED_BUILTIN ,HIGH);
+        digitalWrite(LED_BUILTIN, HIGH);
     }
 
     display.setCursor(0, 9);
@@ -405,16 +389,39 @@ void draw_song_status() {
     display.display();
 }
 
+void set_song_status() {
+    set_executed_function("sendSongTime");
+    bool finished = false;
+
+    unsigned long currentMillis = millis();
+    unsigned long playing_time_ms = currentMillis - playing_time;
+
+    if (playing_time_ms >= 1000) {
+        div_t divisionOfTime = div(playing_time_ms / 1000, 60);
+        playing_minutes = (int) divisionOfTime.quot;
+        playing_seconds = (int) ((playing_time_ms / 1000) - (playing_minutes * 60));
+
+        if (playing_time_ms - playing_time_last_sent >= 1000) {
+            playing_time_last_sent = playing_time_ms;
+            int stats[] = {0x109, (int) playing_minutes, (int) playing_seconds, CMD_END};
+            transmit_commands(stats, 4);
+            Serial.print(playing_minutes);
+            Serial.print(":");
+            Serial.println(playing_seconds);
+        }
+        draw_song_status();
+    }
+}
+
 /**
  * @name loop
  */
 void loop() {
-    draw_command_screen();
+//    draw_command_screen();
     if (cdc_is_playing) {
-        if (!playing_total) {
+        while (!playing_total) {
             set_song_status();
         }
-        draw_song_status();
     }
 
     unsigned data = rx();
@@ -426,18 +433,16 @@ void loop() {
 
     switch (last_command) {
         case 0x21: {
-            cdc_initialized = true;
-            delay(5000);
+//            delay(1000);
             send_no_disc();
+            cdc_initialized = true;
             break;
         }
         case 0xA5: {
-            if (last_command == 0xA5) {
-                delay(30);
-                set_disc_ready(1, 5); // Testado
-                delay(1000);
-                cdc_is_playing = true;
-            }
+            delay(30);
+            set_disc_ready(1, 5); // Testado
+            delay(1000);
+            cdc_is_playing = true;
             break;
         }
         default: {
